@@ -1,0 +1,198 @@
+#!/bin/bash
+# Name: functions
+# Author: Chuck Gilbert <chuck.gilbert@oracle.com
+# Description: This file serves as a library of functions used
+#   to configure GlusterFS with Samba.
+#
+
+# check_status(<return code> <identifier>): Check the return code of
+#   of action.
+function check_status {
+  if [ ! "$1" = "0" ]
+  then
+    echo "** Failed Action: $2 **"
+    exit 1
+  fi
+}
+
+# list_length(): Return the length of the list
+function list_length() {
+  echo $(wc -w <<< "$@")
+}
+
+# install_gluster_smb_reqs(): Ensure all required Gluster and Samba Pkgs
+#   are available.
+function install_gluster_smb_reqs() {
+  yum -y install ctdb samba-vfs-glusterfs tuned samba-client
+  setenforce 0
+  /bin/cp files/selinux_config /etc/selinux/config
+}
+
+# tuned_config(): Enable/Start Tuned
+function tuned_config() {
+  /sbin/chkconfig tuned on
+  /sbin/service tuned start
+  /sbin/tuned-adm profile throughput-performance
+
+  /sbin/service irqbalance stop
+  /sbin/chkconfig irqbalance off
+}
+
+# restart_glusterd(): Function to restart Glusterd
+function restart_glusterd() {
+  service glusterfsd restart  
+  check_status $? "restart_glusterd"
+}
+
+# enable_smb(): Enable SMB on startup
+function enable_smb() { 
+  /sbin/chkconfig smb on
+  check_status $? "enable_smb"
+}
+
+# start_smb(): Start Samba Server
+function start_smb() { 
+  /sbin/service smb start
+  check_status $? "start_smb" 
+}
+
+# start_ctdb: Start CTDB
+function start_ctdb() {
+  /sbin/service ctdb start
+  check_status $? "start_ctdb"
+}
+
+# create_ctdb_volume(): Creates gluster volume used by the CTDB
+#  processes.
+function create_ctdb_volume() {  
+  brick="$1"
+  serverlist="$2"
+  cluster=""
+  replica_size=$(list_length ${serverlist})
+  
+  for f in $serverlist
+  do
+    cluster="$cluster $f:${brick}"
+  done
+
+  mkdir -p ${brick}
+  gluster volume create ctdb replica $replica_size transport tcp $cluster force --mode=script
+  check_status $? "create_ctdb_volume:create ctdb volume"
+
+  gluster volume start ctdb
+  check_status $? "create_ctdb_volume:start ctdb volume"
+}
+
+# create_ctdb_cluster_list: Create list of servers in the CTDB cluster
+function create_ctdb_cluster_list {
+  cluster_list="/etc/ctdb/nodes"
+  for f in $1
+  do
+    echo "$f" >> $cluster_list
+  done
+}
+
+# tune_gluster_for_smb(): Set recommended tuning params
+#   for new gluster volume for samba share.
+function tune_gluster_for_smb () { 
+  gluster volume set $1 performance.cache-samba-metadata on --mode=script
+  check_status $? "tune_gluster_for_smb:performance.cache-samba-metadata"
+  
+  gluster volume set $1 storage.batch-fsync-delay-usec 0 --mode=script
+  check_status $? "tune_gluster_for_smb:storage.batch-fsync-delay-usec"
+  
+  gluster volume set $1 group metadata-cache --mode=script
+  check_status $? "tune_gluster_for_smb:group metadata-cache"
+
+  gluster volume set $1 cluster.lookup-optimize off --mode=script
+  check_status $? "tune_gluster_for_smb:cluster.lookup-optimize"
+
+  gluster volume set $1 server.event-threads 8 --mode=script
+  check_status $? "tune_gluster_for_smb:server.event-threads"
+  
+  gluster volume set $1 client.event-threads 8 --mode=script
+  check_status $? "tune_gluster_for_smb:client.event-threads"
+
+}
+
+# update_smb_auto_start(): Override the default SMB autostart
+#  script to enable tuning for windows only shares.
+function update_smb_auto_start() {
+  autostart_scripts="/var/lib/glusterd/hooks/1/start/post"
+
+  /bin/cp files/S30samba-start.sh $autostart_scripts/S30samba-start.sh
+  check_status $? "update_smb_auto_start"
+}
+
+# update_ctdb_auto_scripts(): Updates the autostart scripts
+#  for CTDB.
+function update_ctdb_auto_scripts() {
+  autostart_scripts="/var/lib/glusterd/hooks/1/start/post"
+  autostop_scripts="/var/lib/glusterd/hooks/1/stop/pre"
+  
+  /bin/cp files/S29CTDBsetup.sh $autostart_scripts/S29CTDBsetup.sh
+  check_status $? "update_smb_auto_start:ctdb setup"
+  
+  /bin/cp files/S29CTDB-teardown.sh $autostop_scripts/S29CTDB-teardown.sh
+  check_status $? "update_smb_auto_start:ctdb teardown"
+}
+
+# enable_smb_clustering(): Copy the base samba clustering config into place.
+function enable_smb_clustering() {
+  /bin/cp files/smb.conf.clustering /etc/samba/smb.conf
+  check_status $? "enable_smb_clustering:smb.conf"
+}
+
+# check_master_node(): Checks if the commands are being run on the master
+#   glusterfs server.
+function check_master_node() {
+  ret=$(ifconfig | grep $1)
+  
+  if [ ! "$?" = "0" ]
+  then
+    echo 1
+  fi
+  echo 0
+}
+
+# set_smbpasswd(): Sets the specified users smbpasswd for mounting
+#  the cifs share.
+function set_smbpasswd() {
+  (echo $2; echo $2) | smbpasswd -s -a $1
+}
+
+# set_perms(): Set ACLs for Volume for User
+function set_perms() {
+  mkdir -p /glusterpermset
+  mount -t glusterfs -o acl localhost:/$1 /glusterpermset
+  setfacl -m user:$2:rwx /glusterpermset
+  setfacl -m d:user:$2:rwx /glusterpermset
+  mkdir /glusterpermset/opc
+  chown $2.$2 /glusterpermset/opc
+  umount /glusterpermset
+}
+
+# restart_volume(): Restarts a given glustervolume
+function restart_volume() {
+  gluster volume stop $1 force --mode=script
+  sleep 5
+  gluster volume start $1 force --mode=script
+}
+
+# test_smb(): Tests that given SMB share is exported correctly
+function test_smb() {
+  res=$(check_smbclient -L localhost -U%)
+  check_status $? "restart_glusterd"
+}
+
+# secondary_vnic_config(): Configure instance secondary vnic 
+#   for multi-channel support
+function secondary_vnic_config() {
+  # Download secondary_vnic_all_configure.sh script
+  wget https://docs.cloud.oracle.com/iaas/Content/Resources/Assets/secondary_vnic_all_configure.sh
+  check_status $? "secondary_vnic_config: Download Script"
+  
+  # Add secondary vnic to active instance
+  bash secondary_vnic_all_configure.sh -c
+  check_status $? "secondary_vnic_config: Create VNIC in Instance"
+}

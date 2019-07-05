@@ -1,0 +1,33 @@
+#!/bin/bash
+
+#SET COMPARTMENT
+profile=DEFAULT
+compartment_id=
+
+#IF USING AN EXISTING NETWORK SET
+vcn_id=
+subnet_id=
+
+#SET GLUSTER SERVER
+gluster_server_shape=BM.HPC2.36
+image=Oracle-Linux-7.6-2019.01.17-0
+region=uk-london-1 #us-phoenix-1,us-ashburn-1,eu-frankfurt-1,uk-london-1
+ad=2
+server_nodes=2
+blksize_tb=1
+blk_num=0
+full_CIDR=10.0.2.0
+cifs_multi_channel=no
+
+#CALCULATED VARIABLES
+PRE=`uuidgen | cut -c-5`
+USER=opc
+AD=`oci iam availability-domain list --profile $profile -c $compartment_id --region $region | jq -r .data[].name | grep -e '-'$ad`
+OS=`oci compute image list --profile $profile -c $compartment_id --region $region --output table --query "data [*].{ImageName:\"display-name\", OCID:id}" | grep $image | awk '{ print $4 }'`
+INFO='--profile '$profile' --region '$region' --availability-domain '$AD' -c '$compartment_id
+subnet=`echo $full_CIDR | awk -F. '{print $1"."$2"."$3}'`
+
+#BASH COLORS
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
